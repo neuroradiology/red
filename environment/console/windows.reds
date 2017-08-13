@@ -1,7 +1,7 @@
 Red/System [
-	Title:	"GUI console"
+	Title:	"GUI console windows backend"
 	Author: "Qingtian Xie"
-	File: 	%console.reds
+	File: 	%windows.reds
 	Tabs: 	4
 	Rights: "Copyright (C) 2015 Qingtian Xie. All rights reserved."
 	License: {
@@ -15,15 +15,96 @@ Red/System [
 ps:				as tagPAINTSTRUCT 0
 hdc:			as handle! 0
 mdc:			as handle! 0
-mbmp:			as handle! 0
 timer:			as handle! 0
 max-win-width:	0
 pad-left:		0
+caret-x:		0
 scroll-count:	0
 scroll-x:		0
 scroll-y:		0
 clipboard:		as handle! 0
 paste-data:		as byte-ptr! 0	
+
+OS-char-width?: func [
+	str		[c-string!]
+	n		[integer!]
+	return: [integer!]
+	/local
+		h [integer!]
+		w [integer!]
+][
+	w: 0 h: 0
+	GetTextExtentPoint32 mdc str n as tagSIZE :w
+	w
+]
+
+OS-count-chars: func [
+	str		[red-string!]
+	offset	[integer!]
+	length	[integer!]
+	width	[integer!]
+	return: [integer!]
+	/local
+		h		[integer!]
+		w		[integer!]
+		cnt		[integer!]
+		n		[integer!]
+		head	[integer!]
+		cstr	[c-string!]
+		cp		[integer!]
+][
+	w: 0 cnt: 0
+	head: str/head
+	str/head: offset
+	cstr: unicode/to-utf16-len str :length no
+	GetTextExtentExPoint mdc cstr length width + 1 :cnt null as tagSIZE :w
+	str/head: head
+	if cnt < length [
+		cp: 0
+		GetTextExtentExPoint mdc cstr cnt width :cp null as tagSIZE :w
+		cp: string/rs-abs-at str offset + cnt
+		cstr: as c-string! :cp
+		n: either cp < 00010000h [1][
+			unicode/cp-to-utf16 cp as byte-ptr! str
+		]
+		n: (OS-char-width? cstr n) / 2
+		if width - w > n [cnt: cnt + 1]
+	]
+	cnt
+]
+
+string-lines?: func [
+	str		[red-string!]
+	offset	[integer!]
+	length	[integer!]
+	return: [integer!]
+	/local
+		h		[integer!]
+		w		[integer!]
+		cstr	[c-string!]
+		cols	[integer!]
+		n		[integer!]
+		cnt		[integer!]
+		head	[integer!]
+][
+	if zero? length [return 1]
+	n: 0 w: 0 cnt: 0
+	cols: max-win-width - pad-left
+
+	head: str/head
+	str/head: offset
+	cstr: unicode/to-utf16-len str :length no
+	until [
+		GetTextExtentExPoint mdc cstr length cols :cnt null as tagSIZE :w
+		n: n + 1
+		length: length - cnt
+		cstr: cstr + (cnt * 2)
+		length <= 0
+	]
+	caret-x: w
+	str/head: head
+	n
+]
 
 update-scrollbar: func [
 	vt		[terminal!]
@@ -59,56 +140,64 @@ copy-to-clipboard: func [
 	/local
 		out		[ring-buffer!]
 		data	[red-string!]
-		format	[integer!]
-		head	[integer!]
+		tail	[red-value!]
 		node	[line-node!]
-		start	[byte-ptr!]
-		end		[byte-ptr!]
+		start	[integer!]
+		end		[integer!]
+		unit	[integer!]
 		size	[integer!]
+		len		[integer!]
 		s		[series!]
 		hMem	[handle!]
 		p		[byte-ptr!]
+		p1		[byte-ptr!]
 ][
 	out: vt/out
 	data: out/data
-	head: out/s-head
-	if head = -1 [exit]
+	start: out/s-head
 	if any [
-		head = -1
+		start = -1
 		not OpenClipboard vt/hwnd
 	][exit]
 
-	node: out/lines + head - 1
-	data/head: node/offset + out/s-h-idx
-	start: string/rs-head data
+	node: out/lines + start - 1
+	start: node/offset + out/s-h-idx
 	node: out/lines + out/s-tail - 1
-	data/head: node/offset + out/s-t-idx
-	end: string/rs-head data
-	data/head: 0
+	end: node/offset + out/s-t-idx
 
 	s: GET_BUFFER(data)
-	either start <= end [
-		size: as-integer end - start
-	][
-		size: as-integer end - as byte-ptr! s/offset
-		size: size + as-integer (as byte-ptr! s/tail) - start
+	if out/full? [
+		tail: s/tail
+		s/tail: out/end
 	]
+	len: string/rs-length? data
+	unit: GET_UNIT(s)
+	size: either start <= end [end - start][len - start + end]
+
 	EmptyClipboard
-	hMem: GlobalAlloc 42h size + 2			;-- added null terminator
+	if unit <> UCS-2 [unit: unit * 2]				;-- make enough space for Latin1 and UCS-4
+	hMem: GlobalAlloc 42h size * unit * 2
 	if null? hMem [CloseClipboard exit]
 	p: GlobalLock hMem
 	either start <= end [
-		copy-memory p start size
+		data/head: start
+		p1: as byte-ptr! unicode/to-utf16-len data :size yes
+		copy-memory p p1 size * 2
 	][
-		size: as-integer (as byte-ptr! s/tail) - start
-		copy-memory p start size
-		p: p + size
-		copy-memory p as byte-ptr! s/offset as-integer end - as byte-ptr! s/offset
+		len: len - start
+		data/head: start
+		p1: as byte-ptr! unicode/to-utf16-len data :len yes
+		copy-memory p p1 len * 2
+		p: p + (len * 2)
+		data/head: 0
+		p1: as byte-ptr! unicode/to-utf16-len data :end yes
+		copy-memory p p1 end * 2
 	]
+	data/head: 0
+	if out/full? [s/tail: tail]
 	GlobalUnlock hMem
 
-	format: either GET_UNIT(s) = UCS-2 [CF_UNICODETEXT][CF_TEXT]
-	SetClipboardData format hMem
+	SetClipboardData CF_UNICODETEXT hMem
 	CloseClipboard
 ]
 
@@ -127,12 +216,12 @@ paste-from-clipboard: func [
 		hMem: clipboard
 		p: paste-data
 	][
-		unless OpenClipboard GetParent vt/hwnd [return false]
+		unless OpenClipboard vt/hwnd [return false]
 		hMem: GetClipboardData CF_UNICODETEXT
 	]
 
 	if hMem <> null [
-		unless continue? [p: GlobalLock hMem]
+		unless continue? [p: GlobalLock hMem CloseClipboard]
 		if p <> null [
 			while [
 				cp: (as-integer p/2) << 8 + p/1
@@ -148,6 +237,11 @@ paste-from-clipboard: func [
 						p: p + 2
 					]
 					if cp = 10 [cp: 13]
+					if all [D800h <= cp cp <= DF00h][		;-- USC-4
+						cp: cp and 03FFh << 10				;-- lead surrogate decoding
+						p: p + 2
+						cp: (as-integer p/2) << 8 + p/1 and 03FFh or cp + 00010000h
+					]
 					edit vt cp
 				]
 				p: p + 2
@@ -161,37 +255,8 @@ paste-from-clipboard: func [
 			GlobalUnlock hMem
 		]
 	]
-	CloseClipboard
 	clipboard: null
-	either cp = 13 [true][false]
-]
-
-popup-menu: func [
-	vt		[terminal!]
-	x		[integer!]
-	y		[integer!]
-	/local
-		menu	[handle!]
-		cmd		[integer!]
-		select?	[logic!]
-		paste?	[logic!]
-		flag	[integer!]
-][
-	menu: CreatePopupMenu
-	select?: any [vt/select-all? vt/out/s-head <> -1]
-	paste?: any [
-		IsClipboardFormatAvailable CF_TEXT
-		IsClipboardFormatAvailable CF_UNICODETEXT
-	]
-	flag: either select? [0][3]
-	AppendMenu menu flag WM_COPY #u16 "Copy^-Ctrl+C"
-	flag: either paste? [0][3]
-	AppendMenu menu flag WM_PASTE #u16 "Paste^-Ctrl+V"
-	AppendMenu menu 0800h 0 null
-	AppendMenu menu flag VT_MSG_SELALL #u16 "Select All^-Ctrl+A"
-
-	cmd: TrackPopupMenuEx menu TPM_RETURNCMD x y vt/hwnd null
-	unless zero? cmd [PostMessage vt/hwnd cmd 0 0]
+	cp = 13
 ]
 
 set-font: func [
@@ -202,15 +267,18 @@ set-font: func [
 		w  [integer!]
 ][
 	w: 0
-	dc: GetDC vt/hwnd
+	dc: mdc
 	tm: as tagTEXTMETRIC allocate size? tagTEXTMETRIC
 	SelectObject dc vt/font
 	GetTextMetrics dc tm
-	ReleaseDC vt/hwnd dc
 	update-font vt tm/tmAveCharWidth tm/tmHeight
 	GetCharWidth32 dc 8220 8220 :w
 	extra-table: either w = vt/char-w [stub-table][ambiguous-table]
 	free as byte-ptr! tm
+	DestroyCaret
+	CreateCaret vt/hwnd null 1 vt/char-h
+	vt/caret?: no
+	OS-update-caret vt
 ]
 
 OS-draw-text: func [
@@ -244,6 +312,7 @@ OS-init: func [vt [terminal!]][
 OS-close: func [vt [terminal!]][
 	free as byte-ptr! vt/scrollbar
 	free as byte-ptr! ps
+	DeleteDC mdc
 ]
 
 OS-hide-caret: func [vt [terminal!]][
@@ -251,7 +320,8 @@ OS-hide-caret: func [vt [terminal!]][
 ]
 
 OS-update-caret: func [vt [terminal!]][
-	SetCaretPos vt/caret-x * vt/char-w + vt/pad-left vt/caret-y * vt/char-h
+	vt/caret-x: caret-x
+	SetCaretPos caret-x + vt/pad-left vt/caret-y * vt/char-h
 	if all [vt/input? not vt/caret?][ShowCaret vt/hwnd vt/caret?: yes]
 ]
 
@@ -319,7 +389,9 @@ ConsoleWndProc: func [
 		state	[integer!]
 		out		[ring-buffer!]
 		p-int	[int-ptr!]
-		limit	[red-integer!]
+		size	[red-pair!]
+		mbmp	[handle!]
+		saved	[handle!]
 		rc		[RECT_STRUCT]
 ][
 	vt: as terminal! GetWindowLong hWnd wc-offset - 4
@@ -332,9 +404,11 @@ ConsoleWndProc: func [
 			dc: GetDC hWnd
 			SelectObject dc GetStockObject SYSTEM_FIXED_FONT
 			GetTextMetrics dc tm
+			mdc: CreateCompatibleDC hdc
 			ReleaseDC hWnd dc
 			vt/hwnd: hWnd
 			init vt p-int/6 p-int/5 tm/tmAveCharWidth tm/tmHeight
+			max-win-width: vt/win-w
 			SetWindowLong hWnd wc-offset - 4 as-integer vt
 			free as byte-ptr! tm
 			return 1
@@ -344,20 +418,19 @@ ConsoleWndProc: func [
 			hdc: BeginPaint hWnd ps
 			pad-left: vt/pad-left
 			max-win-width: vt/win-w
-			mdc: CreateCompatibleDC hdc
 			mbmp: CreateCompatibleBitmap hdc max-win-width vt/char-h
-			SelectObject mdc mbmp
-			SelectObject mdc vt/font
+			saved: SelectObject mdc mbmp
 			set-normal-color vt
 			rc: declare RECT_STRUCT
 			rc/top: 0
 			rc/bottom: vt/win-h
 			rc/left: 0
 			rc/right: pad-left
+			SetBkColor hdc vt/bg-color
 			ExtTextOut hdc 0 0 ETO_OPAQUE rc null 0 null
 			paint vt
 			EndPaint hWnd ps
-			DeleteDC mdc
+			SelectObject mdc saved
 			DeleteObject mbmp
 			if vt/caret? [update-caret vt]
 			update-scrollbar vt
@@ -374,8 +447,9 @@ ConsoleWndProc: func [
 			vt/win-h: WIN32_HIWORD(lParam)
 			vt/cols: vt/win-w - vt/pad-left / vt/char-w
 			vt/rows: vt/win-h / vt/char-h
-			limit: as red-integer! #get system/console/limit
-			limit/value: vt/cols - 13
+			size: as red-pair! #get system/console/size
+			size/x: vt/cols
+			size/y: vt/rows
 			OS-refresh vt null
 			return 0
 		]
@@ -511,9 +585,6 @@ ConsoleWndProc: func [
 			close vt
 			quit 0
 		]
-		WM_CONTEXTMENU [
-			popup-menu vt WIN32_LOWORD(lParam) WIN32_HIWORD(lParam)
-		]
 		WM_COPY [copy-to-clipboard vt]
 		WM_PASTE [paste-from-clipboard vt no]
 		WM_CLEAR [0]
@@ -524,6 +595,18 @@ ConsoleWndProc: func [
 		default [0]
 	]
 	DefWindowProc hWnd msg wParam lParam
+]
+
+copy-text: func [face [red-object!]][
+	SendMessage get-face-handle face WM_COPY 0 0
+]
+
+paste-text: func [face [red-object!]][
+	SendMessage get-face-handle face WM_PASTE 0 0
+]
+
+select-text: func [face [red-object!]][
+	SendMessage get-face-handle face VT_MSG_SELALL 0 0
 ]
 
 wcex: declare WNDCLASSEX

@@ -27,21 +27,23 @@ Red [
 	]
 ]
 
-system/state/trace?: no									;-- disable stack trace in console by default
-
 system/console: context [
 
-	prompt: "red>> "
+	prompt: ">> "
+	result: "=="
 	history: make block! 200
-	limit:	 67
+	size:	 0x0
 	catch?:	 no											;-- YES: force script to fallback into the console
+	count:	 [0 0 0]									;-- multiline counters for [squared curly parens]
+	ws:		 charset " ^/^M^-"
 
 	gui?: #system [logic/box #either gui-console? = yes [yes][no]]
 	
 	read-argument: function [][
-		if args: system/options/args [
+		if args: system/script/args [
 			--catch: "--catch"
 			if system/console/catch?: make logic! pos: find args --catch [
+				remove find system/options/args --catch
 				remove/part pos 1 + length? --catch		;-- remove extra space too
 			]
 
@@ -57,47 +59,73 @@ system/console: context [
 					remove file
 					remove back tail file
 				]
-				unless src: attempt [read to file! file][
-					print "*** Error: cannot access argument file"
+				file: to-red-file file
+				either src: attempt [read file][
+					system/options/script: file
+					remove system/options/args
+					args: system/script/args
+					remove/part args any [
+						find/tail next args pick {" } args/1 = #"^""
+						tail args
+					]
+					trim/head args
+				][
+					print ["*** Error: cannot access argument file:^/" file]
 					;quit/return -1
 				]
+				path: first split-path file
+				if path <> %./ [change-dir path]
 			]
 			src
 		]
 	]
 
-	init-console: routine [
+	init: routine [
 		str [string!]
 		/local
 			ret
 	][
-		#if OS = 'Windows [
+		#either OS = 'Windows [
 			;ret: AttachConsole -1
 			;if zero? ret [print-line "ReadConsole failed!" halt]
 
 			ret: SetConsoleTitle as c-string! string/rs-head str
 			if zero? ret [print-line "SetConsoleTitle failed!" halt]
+		][
+			#if gui-console? = no [terminal/pasting?: no]
 		]
+	]
+
+	terminate: routine [][
+		#if OS <> 'Windows [
+		#if gui-console? = no [
+			if terminal/init? [terminal/emit-string "^[[?2004l"]	;-- disable bracketed paste mode
+		]]
 	]
 
 	count-delimiters: function [
 		buffer	[string!]
+		/extern count
 		return: [block!]
 	][
-		count: copy [0 0 0]								;-- [squared curly parens]
 		escaped: [#"^^" skip]
 		
 		parse buffer [
 			any [
 				escaped
-				| #";" thru lf
-				| #"[" (count/1: count/1 + 1)
-				| #"]" (count/1: count/1 - 1)
-				| #"(" (count/3: count/3 + 1)
-				| #")" (count/3: count/3 - 1)
-				| dbl-quote any [escaped | dbl-quote break | skip]
-				| #"{" (count/2: count/2 + 1)
-				  any [escaped | #"}" (count/2: count/2 - 1) break | skip]
+				| pos: #";" if (zero? count/2) :pos remove [skip [thru lf | to end]]
+				| #"[" (if zero? count/2 [count/1: count/1 + 1])
+				| #"]" (if zero? count/2 [count/1: count/1 - 1])
+				| #"(" (if zero? count/2 [count/3: count/3 + 1])
+				| #")" (if zero? count/2 [count/3: count/3 - 1])
+				| dbl-quote if (zero? count/2) any [escaped | dbl-quote break | skip]
+				| #"{" (count/2: count/2 + 1) any [
+					escaped
+					| #"{" (count/2: count/2 + 1)
+					| #"}" (count/2: count/2 - 1) break
+					| skip
+				]
+				| #"}" (count/2: count/2 - 1)
 				| skip
 			]
 		]
@@ -106,7 +134,7 @@ system/console: context [
 	
 	try-do: func [code /local result return: [any-type!]][
 		set/any 'result try/all [
-			either 'halt-request = catch/name [set/any 'result do code] 'console [
+			either 'halt-request = set/any 'result catch/name code 'console [
 				print "(halted)"						;-- return an unset value
 			][
 				:result
@@ -119,65 +147,69 @@ system/console: context [
 	buffer: make string! 10000
 	cue:    none
 	mode:   'mono
-
-	eval-command: function [line [string!] /extern cue mode][
-		switch-mode: [
-			mode: case [
-				cnt/1 > 0 ['block]
-				cnt/2 > 0 ['string]
-				cnt/3 > 0 ['paren]
-				'else 	  [
-					do eval
-					'mono
-				]
-			]
-			cue: switch mode [
-				block  ["[    "]
-				string ["{    "]
-				paren  ["(    "]
-				mono   [none]
-			]
+	
+	switch-mode: func [cnt][
+		mode: case [
+			cnt/1 > 0 ['block]
+			cnt/2 > 0 ['string]
+			cnt/3 > 0 ['paren]
+			'else 	  [do-command 'mono]
 		]
+		cue: switch mode [
+			block  ["[    "]
+			string ["{    "]
+			paren  ["(    "]
+			mono   [none]
+		]
+	]
 
-		eval: [
-			if error? code: try [load/all buffer][print code]
+	do-command: function [][
+		if error? code: try [load/all buffer][print code]
+
+		unless any [error? code tail? code][
+			set/any 'result try-do code
 			
-			unless any [error? code tail? code][
-				set/any 'result try-do code
-				
-				case [
-					error? :result [
-						print result
-					]
-					not unset? :result [
-						if limit = length? result: mold/part :result limit [	;-- optimized for width = 72
+			case [
+				error? :result [
+					print [result lf]
+				]
+				not unset? :result [
+					if error? set/any 'err try [		;-- catch eventual MOLD errors
+						limit: size/x - 13
+						if limit = length? result: mold/part :result limit [ ;-- optimized for width = 72
 							clear back tail result
 							append result "..."
 						]
-						print ["==" result]
+						print [system/console/result result]
+					][
+						print :err
 					]
 				]
-				unless last-lf? [prin lf]
 			]
-			clear buffer
+			unless last-lf? [prin lf]
 		]
+		clear buffer
+	]
 	
-		unless tail? line [
+	eval-command: function [line [string!] /extern cue mode][
+		if mode = 'mono [change/dup count 0 3]			;-- reset delimiter counters to zero
+		
+		if any [not tail? line mode <> 'mono][
 			either all [not empty? line escape = last line][
 				cue: none
 				clear buffer
-				mode: 'mono							;-- force exit from multiline mode
+				mode: 'mono								;-- force exit from multiline mode
 				print "(escape)"
 			][
+				cnt: count-delimiters line
 				append buffer line
-				cnt: count-delimiters buffer
-				append buffer lf					;-- needed for multiline modes
+				append buffer lf						;-- needed for multiline modes
 
 				switch mode [
-					block  [if cnt/1 <= 0 [do switch-mode]]
-					string [if cnt/2 <= 0 [do switch-mode]]
-					paren  [if cnt/3 <= 0 [do switch-mode]]
-					mono   [do either any [cnt/1 > 0 cnt/2 > 0 cnt/3 > 0][switch-mode][eval]]
+					block  [if cnt/1 <= 0 [switch-mode cnt]]
+					string [if cnt/2 <= 0 [switch-mode cnt]]
+					paren  [if cnt/3 <= 0 [switch-mode cnt]]
+					mono   [either any [cnt/1 > 0 cnt/2 > 0 cnt/3 > 0][switch-mode cnt][do-command]]
 				]
 			]
 		]
@@ -199,19 +231,37 @@ system/console: context [
 		]
 	]
 
-	launch: function [][
-		either script: read-argument [
-			either not all [
-				script: attempt [load script]
-				script: find script 'Red
-				block? script/2 
+	launch: function [/local result][
+		either script: src: read-argument [
+			parse script [some [[to "Red" pos: 3 skip any ws #"[" to end] | skip]]
+		
+			either script: pos [
+				either error? script: try-do [load script][
+					print :script
+				][
+					either not all [
+						block? script
+						script: find/case script 'Red
+						block? script/2 
+					][
+						print [
+							"*** Error:"
+							either find src "Red/System" [
+								"contains Red/System code which requires compilation!"
+							][
+								"not a Red program!"
+							]
+						]
+						;quit/return -2
+					][
+						expand-directives script
+						set/any 'result try-do skip script 2
+						if error? :result [print result]
+					]
+				]
 			][
-				print "*** Error: not a Red program!"
-				;quit/return -2
-			][
-				set/any 'result try-do skip script 2
-				if error? :result [print result]
-			]
+				print "*** Error: Red header not found!"
+			]	
 			if any [catch? gui?][run/no-banner]
 		][
 			run
@@ -221,11 +271,24 @@ system/console: context [
 
 ;-- Console-oriented function definitions
 
-ll:   func ['dir [any-type!]][list-dir/col :dir 1]
-pwd:  does [prin mold system/options/path]
-halt: does [throw/name 'halt-request 'console]
+expand: func [
+	"Preprocess the argument block and display the output (console only)"
+	blk [block!] "Block to expand"
+][
+	probe expand-directives/clean blk
+]
 
-cd:		:change-dir
-ls: 	:list-dir
+ls:		func ['dir [any-type!]][list-dir :dir]
+ll:		func ['dir [any-type!]][list-dir/col :dir 1]
+pwd:	does [prin mold system/options/path]
+halt:	does [throw/name 'halt-request 'console]
+
+cd:	function [
+	"Changes the active directory path"
+	:dir [file! word! path!] "New active directory of relative path to the new one"
+][
+	change-dir :dir
+]
+
 dir:	:ls
 q: 		:quit

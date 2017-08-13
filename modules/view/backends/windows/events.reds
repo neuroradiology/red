@@ -15,6 +15,8 @@ Red/System [
 	EVT_DISPATCH										;-- allow DispatchMessage call only
 ]
 
+paint: declare tagPAINTSTRUCT							;-- moved here from 'draw.reds'
+
 gui-evt: declare red-event!								;-- low-level event value slot
 gui-evt/header: TYPE_EVENT
 
@@ -51,12 +53,27 @@ push-face: func [
 	make-at handle as red-object! stack/push*
 ]
 
+get-event-window: func [
+	evt		[red-event!]
+	return: [red-value!]
+	/local
+		handle [handle!]
+		msg    [tagMSG]
+][
+	msg: as tagMSG evt/msg
+	handle: get-widget-handle msg
+	as red-value! either handle = as handle! -1 [		;-- filter out unwanted events
+		none-value
+	][
+		push-face GetAncestor handle 2					;-- GA_ROOT
+	]
+]
+
 get-event-face: func [
 	evt		[red-event!]
 	return: [red-value!]
 	/local
 		handle [handle!]
-		face   [red-object!]
 		msg    [tagMSG]
 ][
 	msg: as tagMSG evt/msg
@@ -75,8 +92,12 @@ get-event-offset: func [
 		offset [red-pair!]
 		value  [integer!]
 		msg    [tagMSG]
+		pt	   [tagPOINT]
 		gi	   [GESTUREINFO]
+		x	   [integer!]
+		y	   [integer!]
 ][
+	msg: as tagMSG evt/msg
 	case [
 		any [
 			evt/type <= EVT_OVER
@@ -85,14 +106,40 @@ get-event-offset: func [
 			evt/type = EVT_MOVE
 			evt/type = EVT_SIZE
 		][
-			msg: as tagMSG evt/msg
-
 			offset: as red-pair! stack/push*
 			offset/header: TYPE_PAIR
 			value: msg/lParam
+			
+			either evt/flags and EVT_FLAG_AWAY <> 0 [
+				msg: as tagMSG evt/msg
+				pt: declare tagPOINT
+				pt/x: WIN32_LOWORD(value)
+				pt/y: WIN32_HIWORD(value)
+				ClientToScreen get-child-from-xy msg/hWnd pt/x pt/y pt
+				x: pt/x
+				y: pt/y
+				pt: get-window-pos msg/hWnd
+				ClientToScreen msg/hWnd pt
+				offset/x: x - pt/x
+				offset/y: y - pt/y
+			][
+				offset/x: WIN32_LOWORD(value)
+				offset/y: WIN32_HIWORD(value)
+			]
+			as red-value! offset
+		]
+		any [
+			evt/type = EVT_KEY
+			evt/type = EVT_KEY_UP
+			evt/type = EVT_KEY_DOWN
+		][
+			offset: as red-pair! stack/push*
+			offset/header: TYPE_PAIR
 
-			offset/x: WIN32_LOWORD(value)
-			offset/y: WIN32_HIWORD(value)
+			value: GetMessagePos
+			pt: screen-to-client msg/hWnd WIN32_LOWORD(value) WIN32_HIWORD(value)
+			offset/x: pt/x
+			offset/y: pt/y
 			as red-value! offset
 		]
 		any [
@@ -102,7 +149,6 @@ get-event-offset: func [
 			evt/type = EVT_TWO_TAP
 			evt/type = EVT_PRESS_TAP
 		][
-			msg: as tagMSG evt/msg
 			gi: get-gesture-info msg/lParam
 			
 			offset: as red-pair! stack/push*
@@ -122,6 +168,7 @@ get-event-key: func [
 	return: [red-value!]
 	/local
 		char [red-char!]
+		msg  [tagMSG]
 ][
 	as red-value! switch evt/type [
 		EVT_KEY
@@ -130,7 +177,7 @@ get-event-key: func [
 			either special-key <> -1 [
 				switch special-key [
 					VK_PRIOR	[_page-up]
-					VK_NEXT		[_page_down]
+					VK_NEXT		[_page-down]
 					VK_END		[_end]
 					VK_HOME		[_home]
 					VK_LEFT		[_left]
@@ -155,8 +202,12 @@ get-event-key: func [
 					VK_RSHIFT	[_right-shift]
 					VK_LCONTROL	[_left-control]
 					VK_RCONTROL	[_right-control]
-					VK_LMENU	[_left-menu]
-					VK_RMENU	[_right-menu]
+					VK_CAPITAL	[_caps-lock]
+					VK_NUMLOCK	[_num-lock]
+					VK_LMENU	[_left-alt]
+					VK_RMENU	[_right-alt]
+					VK_LWIN		[_left-command]
+					VK_RWIN		[_right-command]
 					default		[
 						either evt/type = EVT_KEY [none-value][
 							char: as red-char! stack/push*
@@ -173,6 +224,29 @@ get-event-key: func [
 				as red-value! char
 			]
 		]
+		EVT_SCROLL [
+			msg: as tagMSG evt/msg
+			either msg/msg = WM_VSCROLL [
+				switch msg/wParam and FFFFh [
+					SB_LINEUP	[_up]
+					SB_LINEDOWN [_down]
+					SB_PAGEUP	[_page-up]
+					SB_PAGEDOWN	[_page-down]
+					SB_THUMBTRACK [_track]
+					default		[_end]
+				]
+			][
+				switch msg/wParam and FFFFh [
+					SB_LINEUP	[_left]
+					SB_LINEDOWN [_right]
+					SB_PAGEUP	[_page-left]
+					SB_PAGEDOWN	[_page-right]
+					SB_THUMBTRACK [_track]
+					default		[_end]
+				]
+			]
+		]
+		EVT_WHEEL [_wheel]
 		default [as red-value! none-value]
 	]
 ]
@@ -200,8 +274,8 @@ get-event-picked: func [
 				res: as red-value! either zoom-distance = -1 [none/push][
 					pct: as red-float! stack/push*
 					pct/header: TYPE_PERCENT
-					zd: integer/to-float zoom-distance
-					pct/value: 1.0 + ((integer/to-float gi/ullArgumentH) - zd / zd)				
+					zd: as-float zoom-distance
+					pct/value: 1.0 + ((as-float gi/ullArgumentH) - zd / zd)				
 					pct
 				]
 				zoom-distance: gi/ullArgumentH
@@ -214,7 +288,11 @@ get-event-picked: func [
 			]
 		]
 		EVT_MENU [word/push* evt/flags and FFFFh]
-		default	 [integer/push evt/flags and FFFFh]
+		EVT_SCROLL [
+			msg: as tagMSG evt/msg
+			integer/push get-track-pos msg/hWnd msg/msg = WM_VSCROLL
+		]
+		default	 [integer/push evt/flags << 16 >> 16]
 	]
 ]
 
@@ -233,6 +311,7 @@ get-event-flags: func [
 	if evt/flags and EVT_FLAG_AUX_DOWN	 <> 0 [block/rs-append blk as red-value! _aux-down]
 	if evt/flags and EVT_FLAG_CTRL_DOWN	 <> 0 [block/rs-append blk as red-value! _control]
 	if evt/flags and EVT_FLAG_SHIFT_DOWN <> 0 [block/rs-append blk as red-value! _shift]
+	if evt/flags and EVT_FLAG_MENU_DOWN  <> 0 [block/rs-append blk as red-value! _alt]
 	as red-value! blk
 ]
 
@@ -292,6 +371,7 @@ check-extra-keys: func [
 	key: 0
 	if (GetAsyncKeyState VK_CONTROL)  and 8000h <> 0 [key: EVT_FLAG_CTRL_DOWN]
 	if (GetAsyncKeyState VK_SHIFT)    and 8000h <> 0 [key: key or EVT_FLAG_SHIFT_DOWN]
+	if (GetAsyncKeyState VK_MENU)     and 8000h <> 0 [key: key or EVT_FLAG_MENU_DOWN]	;-- ALT key
 	
 	unless only? [
 		if (GetAsyncKeyState 01h) and 8000h <> 0 [key: key or EVT_FLAG_DOWN] 	   ;-- VK_LBUTTON
@@ -310,6 +390,27 @@ char-key?: func [
 ][
 	slot: (as byte-ptr! char-keys) + as-integer (key >>> 3)
 	slot/value and (as-byte (80h >> as-integer (key and as-byte 7))) <> null-byte
+]
+
+get-track-pos: func [
+	hWnd			[handle!]
+	vertical?		[logic!]
+	return:			[integer!]
+	/local
+		nTrackPos	[integer!]
+		nPos		[integer!]
+		nPage		[integer!]
+		nMax		[integer!]
+		nMin		[integer!]
+		fMask		[integer!]
+		cbSize		[integer!]
+][
+	cbSize: size? tagSCROLLINFO
+	fMask: 4 or 10h
+	nPos: 0
+	nTrackPos: 0
+	GetScrollInfo hWnd as-integer vertical? as tagSCROLLINFO :cbSize
+	nTrackPos
 ]
 
 make-event: func [
@@ -337,8 +438,14 @@ make-event: func [
 		]
 		EVT_KEY_DOWN [
 			key: msg/wParam and FFFFh
-			if key = VK_PROCESSKEY [return EVT_DISPATCH] ;-- IME-friendly exit
-			special-key: either char-key? as-byte key [-1][map-left-right key msg/lParam]
+			if key = VK_PROCESSKEY [			;-- IME-friendly exit
+				if ime-open? [special-key: -1]
+				return EVT_DISPATCH
+			]
+			special-key: either any [
+				ime-open?
+				char-key? as-byte key
+			][-1][map-left-right key msg/lParam]
 			gui-evt/flags: key or check-extra-keys no
 		]
 		EVT_KEY_UP [
@@ -349,7 +456,15 @@ make-event: func [
 		EVT_KEY [
 			char: msg/wParam
 			key: check-extra-keys no
-			if key and EVT_FLAG_CTRL_DOWN <> 0 [char: char + 64]
+			if all [
+				key and EVT_FLAG_CTRL_DOWN <> 0
+				96 < char char < 123					;-- #"a" <= char <= #"z"
+			][char: char + 64 special-key: -1]
+			if any [
+				key and EVT_FLAG_SHIFT_DOWN <> 0
+				special-key = VK_LMENU
+				special-key = VK_RMENU
+			][special-key: -1]
 			gui-evt/flags: char or key
 		]
 		EVT_SELECT [
@@ -373,10 +488,11 @@ make-event: func [
 		EVT_RIGHT_UP
 		EVT_MIDDLE_DOWN
 		EVT_MIDDLE_UP
-		EVT_DBL_CLICK [
-			key: 0
+		EVT_DBL_CLICK
+		EVT_WHEEL [
+			key: flags
 			flags: msg/wParam
-			if flags and 08h <> 0 [key: EVT_FLAG_CTRL_DOWN]			;-- MK_CONTROL
+			if flags and 08h <> 0 [key: key or EVT_FLAG_CTRL_DOWN]	;-- MK_CONTROL
 			if flags and 04h <> 0 [key: key or EVT_FLAG_SHIFT_DOWN]	;-- MK_SHIFT
 			gui-evt/flags: key
 		]
@@ -387,9 +503,15 @@ make-event: func [
 		default	 [0]
 	]
 
-	#call [system/view/awake gui-evt]
-
+	stack/mark-try-all words/_anon
 	res: as red-word! stack/arguments
+	catch CATCH_ALL_EXCEPTIONS [
+		#call [system/view/awake gui-evt]
+		stack/unwind
+	]
+	stack/adjust-post-try
+	if system/thrown <> 0 [system/thrown: 0]
+	
 	if TYPE_OF(res) = TYPE_WORD [
 		sym: symbol/resolve res/symbol
 		case [
@@ -437,7 +559,7 @@ init-current-msg: func [
 	/local
 		pos [integer!]
 ][
-	current-msg: declare TAGmsg
+	current-msg: declare tagMSG
 	pos: GetMessagePos
 	current-msg/x: WIN32_LOWORD(pos)
 	current-msg/y: WIN32_HIWORD(pos)
@@ -451,8 +573,11 @@ process-command-event: func [
 	/local
 		type   [red-word!]
 		values [red-value!]
+		int	   [red-integer!]
 		idx	   [integer!]
 		res	   [integer!]
+		saved  [handle!]
+		child  [handle!]
 ][
 	if all [zero? lParam wParam < 1000][				;-- heuristic to detect a menu selection (--)'
 		unless null? menu-handle [
@@ -460,6 +585,9 @@ process-command-event: func [
 			exit
 		]
 	]
+
+	child: as handle! lParam
+	unless null? current-msg [saved: current-msg/hWnd]
 	switch WIN32_HIWORD(wParam) [
 		BN_CLICKED [
 			type: as red-word! get-facet current-msg FACE_OBJ_TYPE
@@ -468,17 +596,22 @@ process-command-event: func [
 				type/symbol = check
 				type/symbol = radio
 			][
-				current-msg/hWnd: as handle! lParam		;-- force child handle
+				current-msg/hWnd: child					;-- force child handle
 				if get-logic-state current-msg [
 					make-event current-msg 0 EVT_CHANGE
 				]
 			]
 		]
-		EN_CHANGE [										  ;-- sent also by CreateWindow
-			unless any [null? current-msg no-face? hWnd][ ;-- ignore CreateWindow-time events
-				unless no-face? as handle! lParam [		  ;-- ignore CreateWindow-time events (fixes #1596)
-					current-msg/hWnd: as handle! lParam	  ;-- force Edit handle
+		EN_CHANGE [											;-- sent also by CreateWindow
+			unless any [null? current-msg no-face? hWnd][	;-- ignore CreateWindow-time events
+				unless no-face? child [		  				;-- ignore CreateWindow-time events (fixes #1596)
+					current-msg/hWnd: child	  				;-- force Edit handle
 					make-event current-msg -1 EVT_CHANGE
+					type: as red-word! get-facet current-msg FACE_OBJ_TYPE
+					if type/symbol = area [
+						extend-area-limit child 16
+						update-scrollbars child null
+					]
 				]
 			]
 			0
@@ -488,30 +621,40 @@ process-command-event: func [
 			values: get-face-values hWnd
 			if values <> null [
 				make-at 
-					as handle! lParam
+					child
 					as red-object! values + FACE_OBJ_SELECTED
 			]
-			current-msg/hWnd: as handle! lParam
+			current-msg/hWnd: child
 			make-event current-msg 0 EVT_FOCUS
 		]
 		EN_KILLFOCUS
 		CBN_KILLFOCUS [
-			current-msg/hWnd: as handle! lParam
+			current-msg/hWnd: child
 			make-event current-msg 0 EVT_UNFOCUS
 		]
 		CBN_SELCHANGE [
-			current-msg/hWnd: as handle! lParam			;-- force ListBox or Combobox handle
-			type: as red-word! get-facet current-msg FACE_OBJ_TYPE
+			current-msg/hWnd: child			;-- force ListBox or Combobox handle
+			values: get-face-values child
+
+			type: as red-word! values + FACE_OBJ_TYPE
 			res: either type/symbol = text-list [LB_GETCURSEL][CB_GETCURSEL]
-			idx: as-integer SendMessage as handle! lParam res 0 0
+			idx: as-integer SendMessage child res 0 0
+
+			int: as red-integer! values + FACE_OBJ_SELECTED
+			if all [
+				TYPE_OF(int) = TYPE_INTEGER
+				idx + 1 = int/value
+			][exit]							;-- do not send event if select the same item
 			res: make-event current-msg idx EVT_SELECT
-			get-selected current-msg idx + 1
+			int/header: TYPE_INTEGER
+			int/value: idx + 1
+
 			if res = EVT_DISPATCH [
 				make-event current-msg 0 EVT_CHANGE
 			]
 		]
 		CBN_EDITCHANGE [
-			current-msg/hWnd: as handle! lParam			;-- force Combobox handle
+			current-msg/hWnd: child			;-- force Combobox handle
 			type: as red-word! get-facet current-msg FACE_OBJ_TYPE
 			unless type/symbol = text-list [
 				make-event current-msg -1 EVT_CHANGE
@@ -519,11 +662,12 @@ process-command-event: func [
 		]
 		STN_CLICKED [
 			init-current-msg
-			current-msg/hWnd: as handle! lParam
+			current-msg/hWnd: child
 			make-event current-msg 0 EVT_LEFT_DOWN
 		]
 		default [0]
 	]
+	unless null? current-msg [current-msg/hWnd: saved]
 ]
 
 paint-background: func [
@@ -531,15 +675,18 @@ paint-background: func [
 	hDC		[handle!]
 	return: [logic!]
 	/local
-		rect   [RECT_STRUCT]
+		rect   [RECT_STRUCT value]
 		hBrush [handle!]
 		color  [integer!]
 ][
 	color: to-bgr as node! GetWindowLong hWnd wc-offset + 4 FACE_OBJ_COLOR
-	if color = -1 [return false]
-
-	hBrush: CreateSolidBrush color
-	rect: declare RECT_STRUCT
+	either color = -1 [
+		either (GetWindowLong hWnd GWL_STYLE) and WS_CHILD = 0 [
+			hBrush: GetSysColorBrush COLOR_3DFACE
+		][return false]
+	][
+		hBrush: CreateSolidBrush color
+	]
 	GetClientRect hWnd rect
 	FillRect hDC rect hBrush
 	DeleteObject hBrush
@@ -559,7 +706,9 @@ process-custom-draw: func [
 		color	[red-tuple!]
 		sym		[integer!]
 		old		[integer!]
+		flags	[integer!]
 		DC		[handle!]
+		rc		[RECT_STRUCT]
 ][
 	item:	as tagNMCUSTOMDRAWINFO lParam
 	values: get-face-values item/hWndFrom
@@ -581,21 +730,25 @@ process-custom-draw: func [
 				txt: as red-string! values + FACE_OBJ_TEXT
 				values: object/get-values font
 				color: as red-tuple! values + FONT_OBJ_COLOR
+				old: SetBkMode DC 1
 				if all [
 					TYPE_OF(color) = TYPE_TUPLE
 					color/array1 <> 0
 				][
-					old: SetBkMode DC 1
 					SetTextColor DC color/array1 and 00FFFFFFh
-					DrawText
-						DC
-						unicode/to-utf16 txt
-						-1
-						as RECT_STRUCT (as int-ptr! item) + 5
-						DT_CENTER or DT_VCENTER or DT_SINGLELINE
-					SetBkMode DC old
-					return CDRF_SKIPDEFAULT
 				]
+				rc: as RECT_STRUCT (as int-ptr! item) + 5
+				flags: DT_VCENTER or DT_SINGLELINE
+				either sym = button [
+					flags: flags or DT_CENTER
+				][
+					rc/left: rc/left + 16
+				]
+				if TYPE_OF(txt) = TYPE_STRING [
+					DrawText DC unicode/to-utf16 txt -1 rc flags
+				]
+				SetBkMode DC old
+				return CDRF_SKIPDEFAULT
 			]
 		]
 	]
@@ -669,20 +822,6 @@ delta-size: func [
 	pt
 ]
 
-update-pair-facet: func [
-	hWnd   [handle!]
-	type   [integer!]
-	lParam [integer!]
-	/local
-		pair [red-pair!]
-][
-	current-msg/hWnd: hWnd
-	pair: as red-pair! get-facet current-msg type
-	pair/header: TYPE_PAIR								;-- forces pair! in case user changed it
-	pair/x: WIN32_LOWORD(lParam)
-	pair/y: WIN32_HIWORD(lParam)
-]
-
 set-window-info: func [
 	hWnd	[handle!]
 	lParam	[integer!]
@@ -714,14 +853,18 @@ set-window-info: func [
 		if pair/y > info/ptMaxSize.y [info/ptMaxSize.y: cy ret?: yes]
 		if pair/x > info/ptMaxTrackSize.x [info/ptMaxTrackSize.x: cx ret?: yes]
 		if pair/y > info/ptMaxTrackSize.y [info/ptMaxTrackSize.y: cy ret?: yes]
-		if pair/x < info/ptMinTrackSize.x [info/ptMinTrackSize.x: cx ret?: yes]
-		if pair/y < info/ptMinTrackSize.y [info/ptMinTrackSize.y: cy ret?: yes]
-
-		pair: as red-pair! values + FACE_OBJ_OFFSET
-		if pair/x < info/ptMaxPosition.x [info/ptMaxPosition.x: pair/x + x ret?: yes]
-		if pair/y < info/ptMaxPosition.y [info/ptMaxPosition.y: pair/y + y ret?: yes]
 	]
 	ret?
+]
+
+TimerProc: func [
+	hWnd   [handle!]
+	msg	   [integer!]
+	id	   [int-ptr!]
+	dwTime [integer!]
+][
+	current-msg/hWnd: hWnd
+	make-event current-msg 0 EVT_TIME
 ]
 
 WndProc: func [
@@ -731,15 +874,19 @@ WndProc: func [
 	lParam	[integer!]
 	return: [integer!]
 	/local
+		target [int-ptr!]
+		this   [this!]
+		rt	   [ID2D1HwndRenderTarget]
 		res	   [integer!]
 		color  [integer!]
 		type   [integer!]
 		pos	   [integer!]
 		handle [handle!]
+		rc	   [RECT_STRUCT value]
+		values [red-value!]
 		font   [red-object!]
-		face   [red-object!]
+		parent [red-object!]
 		draw   [red-block!]
-		state  [red-block!]
 		brush  [handle!]
 		nmhdr  [tagNMHDR]
 		gi	   [GESTUREINFO]
@@ -748,21 +895,23 @@ WndProc: func [
 		p-int  [int-ptr!]
 		winpos [tagWINDOWPOS]
 		w-type [red-word!]
+		miniz? [logic!]
 ][
+	type: either no-face? hWnd [panel][			;@@ remove this test, create a WndProc for panel?
+		values: get-face-values hWnd
+		w-type: (as red-word! values) + FACE_OBJ_TYPE
+		symbol/resolve w-type/symbol
+	]
 	switch msg [
 		WM_NCCREATE [
 			p-int: as int-ptr! lParam
 			store-face-to-hWnd hWnd as red-object! p-int/value
 		]
 		WM_WINDOWPOSCHANGED [
-			w-type: (as red-word! get-face-values hWnd) + FACE_OBJ_TYPE
-			if all [
-				window = symbol/resolve w-type/symbol
-				not win8+?
-			][
+			if all [not win8+? type = window][
 				winpos: as tagWINDOWPOS lParam
 				pt: screen-to-client hWnd winpos/x winpos/y
-				offset: (as red-pair! get-face-values hWnd) + FACE_OBJ_OFFSET
+				offset: (as red-pair! values) + FACE_OBJ_OFFSET
 				pt/x: winpos/x - offset/x - pt/x
 				pt/y: winpos/y - offset/y - pt/y
 				update-layered-window hWnd null pt winpos -1
@@ -770,22 +919,50 @@ WndProc: func [
 		]
 		WM_MOVE
 		WM_SIZE [
-			state: (as red-block! get-face-values hWnd) + FACE_OBJ_STATE
-			if all [
-				TYPE_OF(state) = TYPE_BLOCK			;-- already created the window
-				current-msg <> null
-				wParam <> SIZE_MINIMIZED
-			][
-				type: either msg = WM_MOVE [FACE_OBJ_OFFSET][FACE_OBJ_SIZE]
-				update-pair-facet hWnd type lParam
-				modal-loop-type: either msg = WM_MOVE [EVT_MOVING][EVT_SIZING]
-				current-msg/lParam: lParam
-				make-event current-msg 0 modal-loop-type
-
-				if all [msg = WM_SIZE wParam = SIZE_MAXIMIZED][
-					make-event current-msg 0 EVT_SIZE
+			if (get-face-flags hWnd) and FACET_FLAGS_D2D <> 0 [
+				target: as int-ptr! GetWindowLong hWnd wc-offset - 24
+				if target <> null [
+					this: as this! target/value
+					rt: as ID2D1HwndRenderTarget this/vtbl
+					color: WIN32_LOWORD(lParam)
+					res: WIN32_HIWORD(lParam)
+					rt/Resize this as tagSIZE :color
+					InvalidateRect hWnd null 1
 				]
-				return 0
+			]
+			if type = window [
+				if null? current-msg [init-current-msg]
+				if wParam <> SIZE_MINIMIZED [
+					miniz?: no
+					type: either msg = WM_MOVE [
+						if all [						;@@ MINIMIZED window, @@ find a better way to detect it
+							WIN32_HIWORD(lParam) < -9999
+							WIN32_LOWORD(lParam) < -9999
+						][miniz?: yes]
+						FACE_OBJ_OFFSET
+					][FACE_OBJ_SIZE]
+					if miniz? [return 0]
+
+					offset: as red-pair! values + type
+					offset/header: TYPE_PAIR
+					offset/x: WIN32_LOWORD(lParam)
+					offset/y: WIN32_HIWORD(lParam)
+
+					modal-loop-type: either msg = WM_MOVE [EVT_MOVING][EVT_SIZING]
+					current-msg/hWnd: hWnd
+					current-msg/lParam: lParam
+					make-event current-msg 0 modal-loop-type
+
+					values: values + FACE_OBJ_STATE
+					if all [
+						msg = WM_SIZE
+						TYPE_OF(values) = TYPE_BLOCK
+						any [zero? win-state wParam = SIZE_MAXIMIZED]
+					][
+						make-event current-msg 0 EVT_SIZE
+					]
+					return 0
+				]
 			]
 		]
 		;WM_MOVING
@@ -806,13 +983,19 @@ WndProc: func [
 			;]
 			;return 1									;-- TRUE
 		;]
+		WM_ENTERSIZEMOVE [
+			if type = window [win-state: 1]
+		]
 		WM_EXITSIZEMOVE [
-			type: either modal-loop-type = EVT_MOVING [EVT_MOVE][EVT_SIZE]
-			make-event current-msg 0 type
-			return 0
+			if type = window [
+				win-state: 0
+				type: either modal-loop-type = EVT_MOVING [EVT_MOVE][EVT_SIZE]
+				make-event current-msg 0 type
+				return 0
+			]
 		]
 		WM_ACTIVATE [
-			if WIN32_LOWORD(wParam) <> 0 [set-selected-focus hWnd return 0]
+			if all [type = window WIN32_LOWORD(wParam) <> 0][set-selected-focus hWnd return 0]
 		]
 		WM_GESTURE [
 			handle: hWnd
@@ -846,34 +1029,53 @@ WndProc: func [
 			switch nmhdr/code [
 				TCN_SELCHANGING [return process-tab-select nmhdr/hWndFrom]
 				TCN_SELCHANGE	[process-tab-change nmhdr/hWndFrom]
-				NM_CUSTOMDRAW	[return process-custom-draw wParam lParam]
+				NM_CUSTOMDRAW	[
+					res: process-custom-draw wParam lParam
+					if res <> 0 [return res]
+				]
 				default [0]
 			]
 		]
 		WM_VSCROLL
 		WM_HSCROLL [
-			unless zero? lParam [						;-- message from trackbar
+			either zero? lParam [						;-- message from standard scroll bar
+				current-msg/wParam: wParam
+				make-event current-msg 0 EVT_SCROLL
+			][											;-- message from trackbar
 				if null? current-msg [init-current-msg]
 				current-msg/hWnd: as handle! lParam		;-- trackbar handle
 				get-slider-pos current-msg
 				make-event current-msg 0 EVT_CHANGE
-				return 0
 			]
+			return 0
 		]
 		WM_ERASEBKGND [
-			draw: (as red-block! get-face-values hWnd) + FACE_OBJ_DRAW
-			unless TYPE_OF(draw) = TYPE_BLOCK [			;-- draw background in draw to avoid flickering
-				if render-base hWnd as handle! wParam [return 1]
+			draw: (as red-block! values) + FACE_OBJ_DRAW
+			if any [
+				TYPE_OF(draw) = TYPE_BLOCK				;-- draw background in draw to avoid flickering
+				render-base hWnd as handle! wParam
+			][
+				return 1
+			]
+			parent: as red-object! values + FACE_OBJ_PARENT
+			if TYPE_OF(parent) = TYPE_OBJECT [
+				w-type: as red-word! get-node-facet parent/ctx FACE_OBJ_TYPE
+				if tab-panel = symbol/resolve w-type/symbol [
+					GetClientRect hWnd rc
+					FillRect as handle! wParam rc GetSysColorBrush COLOR_WINDOW
+					return 1
+				]
 			]
 		]
 		WM_PAINT [
-			draw: (as red-block! get-face-values hWnd) + FACE_OBJ_DRAW
+			draw: (as red-block! values) + FACE_OBJ_DRAW
 			if TYPE_OF(draw) = TYPE_BLOCK [
 				either zero? GetWindowLong hWnd wc-offset - 4 [
 					do-draw hWnd null draw no yes yes yes
 				][
 					bitblt-memory-dc hWnd no
 				]
+				return 0
 			]
 		]
 		WM_CTLCOLOREDIT
@@ -908,6 +1110,13 @@ WndProc: func [
 				]
 			]
 		]
+		WM_SETCURSOR [
+			res: GetWindowLong as handle! wParam wc-offset - 28
+			unless zero? res [
+				SetCursor as handle! res
+				return 1
+			]
+		]
 		WM_ENTERMENULOOP [
 			if zero? wParam [							;-- reset if entering menu bar
 				menu-origin: null
@@ -921,19 +1130,21 @@ WndProc: func [
 			]
 			return 0
 		]
-		WM_GETMINMAXINFO [
-			if set-window-info hWnd lParam [return 0]
+		WM_GETMINMAXINFO [								;@@ send before WM_NCCREATE
+			if all [type = window set-window-info hWnd lParam][return 0]
 		]
 		WM_CLOSE [
-			handle: current-msg/hWnd
-			SetFocus current-msg/hWnd					;-- force focus on the closing window,
-			current-msg/hWnd: handle					;-- prevents late unfocus event generation.
-			
-			res: make-event current-msg 0 EVT_CLOSE
-			if res  = EVT_DISPATCH [return 0]				;-- continue
-			;if res <= EVT_DISPATCH   [free-handles hWnd]	;-- done
-			if res  = EVT_NO_DISPATCH [clean-up PostQuitMessage 0]	;-- stop
-			return 0
+			if type = window [
+				either -1 = GetWindowLong hWnd wc-offset - 4 [clean-up][
+					SetFocus hWnd									;-- force focus on the closing window,
+					current-msg/hWnd: hWnd							;-- prevents late unfocus event generation.
+					res: make-event current-msg 0 EVT_CLOSE
+					if res  = EVT_DISPATCH [return 0]				;-- continue
+					;if res <= EVT_DISPATCH   [free-handles hWnd]	;-- done
+					if res  = EVT_NO_DISPATCH [clean-up PostQuitMessage 0]	;-- stop
+					return 0
+				]
+			]
 		]
 		default [0]
 	]
@@ -972,18 +1183,28 @@ process: func [
 			
 			evt?: all [hover-saved <> null hover-saved <> new]
 			
-			if evt? [
+			if all [evt? IsWindowEnabled hover-saved] [
 				msg/hWnd: hover-saved
 				make-event msg EVT_FLAG_AWAY EVT_OVER
 			]
-			if any [
-				evt?
-				(get-face-flags new) and FACET_FLAGS_ALL_OVER <> 0
+			if all [
+				IsWindowEnabled new
+				any [
+					evt?
+					(get-face-flags new) and FACET_FLAGS_ALL_OVER <> 0
+				]
 			][
 				msg/hWnd: new
 				make-event msg 0 EVT_OVER
 			]
 			hover-saved: new
+			EVT_DISPATCH
+		]
+		WM_MOUSEWHELL [
+			x: WIN32_HIWORD(msg/wParam)
+			y: either x < 0 [0 - x][x]
+			if y > 120 [y: 120]							;-- WHEEL_DELTA: 120
+			make-event msg x / y and FFFFh EVT_WHEEL
 			EVT_DISPATCH
 		]
 		WM_LBUTTONDOWN	[
@@ -1011,10 +1232,6 @@ process: func [
 		WM_RBUTTONUP	[make-event msg 0 EVT_RIGHT_UP]
 		WM_MBUTTONDOWN	[make-event msg 0 EVT_MIDDLE_DOWN]
 		WM_MBUTTONUP	[make-event msg 0 EVT_MIDDLE_UP]
-		WM_HSCROLL [
-			get-slider-pos msg
-			make-event current-msg 0 EVT_CHANGE
-		]
 		WM_KEYDOWN		[
 			res: make-event msg 0 EVT_KEY_DOWN
 			if res <> EVT_NO_DISPATCH [
@@ -1027,20 +1244,14 @@ process: func [
 						default  [res: make-event msg 0 EVT_KEY] ;-- force a KEY event
 					]
 				]
-			]	
+			]
 			res
 		]
 		WM_SYSKEYUP
 		WM_KEYUP		[make-event msg 0 EVT_KEY_UP]
-		WM_SYSKEYDOWN	[
-			make-event msg 0 EVT_KEY_DOWN
-			EVT_NO_DISPATCH
-		]
+		WM_SYSKEYDOWN	[make-event msg 0 EVT_KEY_DOWN]
 		WM_CHAR
-		WM_DEADCHAR [
-			make-event current-msg 0 EVT_KEY
-			EVT_DISPATCH
-		]
+		WM_DEADCHAR		[make-event msg 0 EVT_KEY]
 		WM_LBUTTONDBLCLK [
 			menu-origin: null							;-- reset if user clicks on menu bar
 			menu-ctx: null
@@ -1059,7 +1270,6 @@ do-events: func [
 	/local
 		msg	  [tagMSG]
 		state [integer!]
-		res	  [integer!]
 		msg?  [logic!]
 ][
 	msg: declare tagMSG
@@ -1082,7 +1292,9 @@ do-events: func [
 		]
 		if no-wait? [return msg?]
 	]
-	exit-loop: exit-loop - 1
-	if exit-loop > 0 [PostQuitMessage 0]
+	unless no-wait? [
+		exit-loop: exit-loop - 1
+		if exit-loop > 0 [PostQuitMessage 0]
+	]
 	msg?
 ]
